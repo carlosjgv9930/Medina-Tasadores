@@ -12,3 +12,4 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=tu-anon-key
 
 2. `npm install`
 3. `npm run dev`
+   
