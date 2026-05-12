@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     if (!response.ok) {
       const err = await response.json().catch(() => ({}))
       return NextResponse.json(
-        { error: `Error API: ${err.error?.message || response.statusText}` },
+        { error: `Error API: ${JSON.stringify(err)}` },
         { status: response.status }
       )
     }
