@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     const base      = FILE_NAMES[doc_type] || 'Documento';
     const fileName  = `${base}__Reclamo_No__${reclamo}__${asegurado}.docx`;
 
-    return new NextResponse(buffer, {
+    return new NextResponse(new Uint8Array(buffer), {
       status: 200,
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
