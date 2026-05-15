@@ -4,6 +4,8 @@ import { createClient } from '@/lib/supabase-browser'
 import { useRouter } from 'next/navigation'
 import { STATUSES, STATUS_MAP, ASEGURADORAS, TIPOS_POLIZA, EMPRESA } from '@/lib/constants'
 import StatusBadge from '@/components/StatusBadge'
+import DownloadDocxButton from '@/components/DownloadDocxButton'
+import type { DocType } from '@/lib/docx-generator'
 
 export default function CaseDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
@@ -191,6 +193,38 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
     { title: 'Resumen del Caso', action: 'Dame un resumen completo del estado actual del caso, datos disponibles y pasos pendientes.', type: 'email_resumen', req: false },
   ]
 
+  const DOC_TYPE_MAP: Record<string, DocType> = {
+    'reporte_inspeccion': 'resumen_inspeccion',
+    'informe_preliminar': 'informe_preliminar',
+    'informe_final':      'informe_final',
+    'convenio_ajuste':    'convenio_ajuste',
+    'carta_declinacion':  'carta_declinacion',
+    'informe_cierre':     'informe_cierre',
+  }
+
+  const caseDataForDocx = {
+    asegurado:           c.asegurado,
+    aseguradora:         c.aseguradora,
+    reclamo:             c.reclamo,
+    poliza_no:           c.poliza_no,
+    tipo_poliza:         c.tipo_poliza,
+    fecha_siniestro:     c.fecha_siniestro,
+    fecha_asignacion:    c.fecha_asignacion,
+    fecha_inspeccion:    c.fecha_inspeccion,
+    vigencia:            c.vigencia,
+    causa:               c.causa,
+    suma_asegurada:      c.suma_asegurada,
+    deducible:           c.deducible,
+    intermediario:       c.intermediario,
+    att_nombre:          c.att_nombre,
+    att_cargo:           c.att_cargo,
+    ubicacion_riesgo:    c.ubicacion_riesgo,
+    giro_negocio:        c.giro_negocio,
+    receptor_inspeccion: c.receptor_inspeccion,
+    receptor_cargo:      c.receptor_cargo,
+    reserva:             c.reserva,
+  }
+
   return (
     <>
     <div className="flex h-[calc(100vh-100px)]">
@@ -312,7 +346,16 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
                   <div className="text-xs font-semibold text-slate-700">{d.title}</div>
                   <div className="text-[10px] text-slate-400">{new Date(d.created_at).toLocaleString('es-DO',{dateStyle:'short',timeStyle:'short'})} · {d.status}</div>
                 </div>
-                <button onClick={()=>copyText(d.content)} className="px-2 py-1 text-[10px] text-blue-600 hover:bg-blue-50 rounded">📋 Copiar</button>
+                <div className="flex items-center gap-1">
+                  <button onClick={()=>copyText(d.content)} className="px-2 py-1 text-[10px] text-blue-600 hover:bg-blue-50 rounded">📋 Copiar</button>
+                  {DOC_TYPE_MAP[d.doc_type] && (
+                    <DownloadDocxButton
+                      docType={DOC_TYPE_MAP[d.doc_type]}
+                      caseData={caseDataForDocx}
+                      content={d.content}
+                    />
+                  )}
+                </div>
               </div>
             ))}
           </div>
