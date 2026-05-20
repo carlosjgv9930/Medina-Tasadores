@@ -7,13 +7,14 @@ import StatusBadge from '@/components/StatusBadge'
 type Case = {
   id: string; reclamo: string; asegurado: string; aseguradora: string;
   tipo_poliza: string; status: string; intermediario: string;
-  created_at: string; assigned_to: string;
+  created_at: string; assigned_to: string; fecha_siniestro: string;
   assigned_profile?: { short_name: string } | null;
 }
 
 export default function DashboardPage() {
   const [cases, setCases] = useState<Case[]>([])
   const [filter, setFilter] = useState('all')
+  const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const supabase = createClient()
 
@@ -29,79 +30,155 @@ export default function DashboardPage() {
   }
 
   async function deleteCase(id: string) {
-    if (!confirm('¿Eliminar este caso permanentemente?')) return
+    if (!confirm('¿Eliminar este caso permanentemente? Esta acción no se puede deshacer.')) return
     await supabase.from('cases').delete().eq('id', id)
     loadCases()
   }
 
   const filtered = cases.filter(c => {
-    if (filter === 'active') return !['cerrado', 'declinado'].includes(c.status)
-    if (filter === 'closed') return ['cerrado', 'declinado'].includes(c.status)
-    return true
+    const matchFilter =
+      filter === 'all' ? true :
+      filter === 'active' ? !['cerrado', 'declinado', 'sin_cobertura'].includes(c.status) :
+      ['cerrado', 'declinado', 'sin_cobertura'].includes(c.status)
+    const q = search.toLowerCase()
+    const matchSearch = !q ||
+      (c.asegurado || '').toLowerCase().includes(q) ||
+      (c.reclamo || '').toLowerCase().includes(q) ||
+      (c.aseguradora || '').toLowerCase().includes(q) ||
+      (c.intermediario || '').toLowerCase().includes(q)
+    return matchFilter && matchSearch
   })
 
-  const active = cases.filter(c => !['cerrado', 'declinado'].includes(c.status)).length
-  const total = cases.length
+  const active   = cases.filter(c => !['cerrado','declinado','sin_cobertura'].includes(c.status)).length
+  const total    = cases.length
   const enAjuste = cases.filter(c => c.status === 'en_ajuste').length
-  const closed = cases.filter(c => ['cerrado', 'declinado'].includes(c.status)).length
+  const closed   = cases.filter(c => ['cerrado','declinado','sin_cobertura'].includes(c.status)).length
+
+  const stats = [
+    { n: active,   label: 'Activos',   icon: '📂', color: '#2563eb', bg: '#eff6ff' },
+    { n: total,    label: 'Total',     icon: '🗂️',  color: '#64748b', bg: '#f8fafc' },
+    { n: enAjuste, label: 'En Ajuste', icon: '⚖️',  color: '#d97706', bg: '#fffbeb' },
+    { n: closed,   label: 'Cerrados',  icon: '✅',  color: '#16a34a', bg: '#f0fdf4' },
+  ]
+
+  const formatDate = (d: string) =>
+    d ? new Date(d).toLocaleDateString('es-DO', { day:'2-digit', month:'short', year:'2-digit' }) : '—'
 
   return (
-    <div className="p-6">
+    <div style={{ padding: '24px', backgroundColor: '#f8fafc', minHeight: '100%' }}>
+
       {/* STATS */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        {[
-          { n: active, l: 'Activos', color: 'text-blue-700' },
-          { n: total, l: 'Total', color: 'text-slate-500' },
-          { n: enAjuste, l: 'En Ajuste', color: 'text-amber-600' },
-          { n: closed, l: 'Cerrados', color: 'text-green-600' },
-        ].map((s, i) => (
-          <div key={i} className="bg-white rounded-xl p-4 shadow-sm">
-            <div className={`text-2xl font-bold ${s.color}`}>{s.n}</div>
-            <div className="text-xs text-slate-500">{s.l}</div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'16px', marginBottom:'24px' }}>
+        {stats.map((s, i) => (
+          <div key={i} style={{ backgroundColor:'white', borderRadius:'12px', padding:'20px', border:'1px solid #e2e8f0', display:'flex', alignItems:'center', gap:'14px' }}>
+            <div style={{ width:'44px', height:'44px', borderRadius:'10px', backgroundColor:s.bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'20px', flexShrink:0 }}>
+              {s.icon}
+            </div>
+            <div>
+              <div style={{ fontSize:'26px', fontWeight:700, color:s.color, lineHeight:1 }}>{s.n}</div>
+              <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'3px', fontWeight:500 }}>{s.label}</div>
+            </div>
           </div>
         ))}
       </div>
 
-      {/* FILTERS */}
-      <div className="flex gap-2 mb-4">
-        {['all', 'active', 'closed'].map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition ${filter === f ? 'bg-blue-700 text-white' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>
-            {f === 'all' ? 'Todos' : f === 'active' ? 'Activos' : 'Cerrados'}
-          </button>
-        ))}
+      {/* TOOLBAR */}
+      <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'16px' }}>
+        {/* Search */}
+        <div style={{ flex:1, position:'relative' }}>
+          <span style={{ position:'absolute', left:'12px', top:'50%', transform:'translateY(-50%)', color:'#94a3b8', fontSize:'14px' }}>🔍</span>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar por asegurado, reclamo, aseguradora..."
+            style={{ width:'100%', paddingLeft:'36px', paddingRight:'12px', paddingTop:'9px', paddingBottom:'9px', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'13px', outline:'none', backgroundColor:'white', color:'#0f172a', boxSizing:'border-box' }}
+          />
+        </div>
+
+        {/* Filters */}
+        <div style={{ display:'flex', gap:'4px', backgroundColor:'white', borderRadius:'8px', border:'1px solid #e2e8f0', padding:'4px' }}>
+          {[
+            { key:'all',    label:'Todos' },
+            { key:'active', label:'Activos' },
+            { key:'closed', label:'Cerrados' },
+          ].map(f => (
+            <button key={f.key} onClick={() => setFilter(f.key)}
+              style={{ padding:'6px 14px', borderRadius:'6px', fontSize:'12px', fontWeight:600, border:'none', cursor:'pointer', transition:'all 0.15s', backgroundColor: filter===f.key ? '#2563eb' : 'transparent', color: filter===f.key ? 'white' : '#64748b' }}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        {/* New case button */}
+        <Link href="/dashboard/cases/new"
+          style={{ padding:'9px 18px', backgroundColor:'#1e3a8a', color:'white', borderRadius:'8px', fontSize:'13px', fontWeight:600, textDecoration:'none', whiteSpace:'nowrap', display:'flex', alignItems:'center', gap:'6px' }}>
+          + Nuevo Caso
+        </Link>
       </div>
 
       {/* TABLE */}
-      <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-        <div className="grid grid-cols-[130px_1fr_160px_140px_140px_80px_40px] px-4 py-3 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase tracking-wide font-mono">
-          <div>Reclamo</div><div>Asegurado</div><div>Aseguradora</div><div>Tipo Póliza</div><div>Estatus</div><div>Asign.</div><div></div>
+      <div style={{ backgroundColor:'white', borderRadius:'12px', border:'1px solid #e2e8f0', overflow:'hidden' }}>
+        {/* Header */}
+        <div style={{ display:'grid', gridTemplateColumns:'140px 1fr 150px 130px 150px 90px 36px', padding:'10px 16px', backgroundColor:'#f8fafc', borderBottom:'1px solid #e2e8f0' }}>
+          {['Reclamo', 'Asegurado / Intermediario', 'Aseguradora', 'Tipo Póliza', 'Estatus', 'Asign.', ''].map((h, i) => (
+            <div key={i} style={{ fontSize:'10px', fontWeight:700, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'0.06em' }}>{h}</div>
+          ))}
         </div>
+
         {loading ? (
-          <div className="p-12 text-center text-slate-400 text-sm">Cargando casos...</div>
+          <div style={{ padding:'60px', textAlign:'center', color:'#94a3b8', fontSize:'14px' }}>
+            <div style={{ fontSize:'32px', marginBottom:'12px' }}>⏳</div>
+            Cargando casos...
+          </div>
         ) : filtered.length === 0 ? (
-          <div className="p-12 text-center text-slate-400">
-            <div className="text-4xl mb-3">📋</div>
-            <p className="font-semibold text-sm mb-1">Sin casos registrados</p>
-            <p className="text-xs">Clic en <Link href="/dashboard/cases/new" className="text-blue-600 font-semibold">+ Nuevo Caso</Link> para comenzar</p>
+          <div style={{ padding:'60px', textAlign:'center', color:'#94a3b8' }}>
+            <div style={{ fontSize:'48px', marginBottom:'12px' }}>📋</div>
+            <p style={{ fontSize:'14px', fontWeight:600, color:'#475569', marginBottom:'6px' }}>
+              {search ? 'Sin resultados para tu búsqueda' : 'Sin casos registrados'}
+            </p>
+            <p style={{ fontSize:'12px', marginBottom:'16px' }}>
+              {search ? 'Intenta con otros términos' : 'Empieza creando tu primer caso'}
+            </p>
+            {!search && (
+              <Link href="/dashboard/cases/new"
+                style={{ padding:'8px 16px', backgroundColor:'#2563eb', color:'white', borderRadius:'8px', fontSize:'13px', fontWeight:600, textDecoration:'none' }}>
+                + Nuevo Caso
+              </Link>
+            )}
           </div>
         ) : filtered.map((c, i) => (
           <Link href={`/dashboard/cases/${c.id}`} key={c.id}
-            className={`grid grid-cols-[130px_1fr_160px_140px_140px_80px_40px] px-4 py-3 items-center border-b border-slate-50 hover:bg-blue-50/50 transition cursor-pointer ${i % 2 ? 'bg-slate-50/50' : ''}`}>
-            <div className="font-mono text-xs text-blue-700 font-semibold">{c.reclamo || '—'}</div>
-            <div>
-              <div className="font-semibold text-sm text-slate-900">{c.asegurado || '—'}</div>
-              <div className="text-[11px] text-slate-400">{c.intermediario || ''}</div>
+            style={{ display:'grid', gridTemplateColumns:'140px 1fr 150px 130px 150px 90px 36px', padding:'11px 16px', alignItems:'center', borderBottom: i < filtered.length-1 ? '1px solid #f1f5f9' : 'none', textDecoration:'none', backgroundColor: i%2===0 ? 'white' : '#fafafa', transition:'background-color 0.1s' }}
+            onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#eff6ff')}
+            onMouseLeave={e => (e.currentTarget.style.backgroundColor = i%2===0 ? 'white' : '#fafafa')}
+          >
+            <div style={{ fontFamily:'monospace', fontSize:'11px', color:'#2563eb', fontWeight:700 }}>
+              {c.reclamo || <span style={{ color:'#cbd5e1' }}>Sin número</span>}
             </div>
-            <div className="text-xs text-slate-600">{(c.aseguradora || '—').replace(' S.A.', '').replace(' Compañía de Seguros', '')}</div>
-            <div className="text-xs text-slate-500">{c.tipo_poliza || '—'}</div>
+            <div>
+              <div style={{ fontSize:'13px', fontWeight:600, color:'#0f172a' }}>{c.asegurado || '—'}</div>
+              <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'1px' }}>{c.intermediario || ''}</div>
+            </div>
+            <div style={{ fontSize:'12px', color:'#475569' }}>
+              {(c.aseguradora || '—').replace(' S.A.','').replace(' Compañía de Seguros','').replace(', S.A.','').slice(0,22)}
+            </div>
+            <div style={{ fontSize:'11px', color:'#64748b' }}>{c.tipo_poliza ? c.tipo_poliza.slice(0,18) : '—'}</div>
             <div><StatusBadge status={c.status} /></div>
-            <div className="text-[11px] text-slate-400">{c.assigned_profile?.short_name || '—'}</div>
-            <div onClick={e => { e.preventDefault(); e.stopPropagation(); deleteCase(c.id) }}
-              className="text-xs text-red-400 hover:text-red-600 cursor-pointer font-bold">✕</div>
+            <div style={{ fontSize:'11px', color:'#94a3b8' }}>{c.assigned_profile?.short_name || '—'}</div>
+            <div
+              onClick={e => { e.preventDefault(); e.stopPropagation(); deleteCase(c.id) }}
+              style={{ fontSize:'14px', color:'#fca5a5', cursor:'pointer', textAlign:'center', lineHeight:1 }}
+              title="Eliminar caso"
+            >✕</div>
           </Link>
         ))}
       </div>
+
+      {filtered.length > 0 && (
+        <div style={{ marginTop:'12px', fontSize:'11px', color:'#94a3b8', textAlign:'right' }}>
+          {filtered.length} {filtered.length === 1 ? 'caso' : 'casos'} {filter !== 'all' ? 'filtrados' : 'en total'}
+        </div>
+      )}
     </div>
   )
 }

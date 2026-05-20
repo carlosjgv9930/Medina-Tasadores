@@ -1,20 +1,70 @@
 export const STATUSES = [
-  { key: 'apertura', label: 'Apertura del Caso', color: '#6366f1' },
-  { key: 'coordinando_inspeccion', label: 'Coordinando Inspección', color: '#f59e0b' },
-  { key: 'inspeccion_realizada', label: 'Inspección Realizada', color: '#8b5cf6' },
-  { key: 'resumen_enviado', label: 'Resumen Enviado', color: '#3b82f6' },
-  { key: 'docs_solicitados', label: 'Docs. Solicitados', color: '#f97316' },
-  { key: 'docs_parciales', label: 'Docs. Parciales', color: '#eab308' },
-  { key: 'docs_completos', label: 'Docs. Completos', color: '#10b981' },
-  { key: 'en_ajuste', label: 'En Ajuste', color: '#06b6d4' },
-  { key: 'convenio_enviado', label: 'Convenio Enviado', color: '#8b5cf6' },
-  { key: 'informe_final_enviado', label: 'Informe Final Enviado', color: '#22c55e' },
-  { key: 'cerrado', label: 'Cerrado ✓', color: '#6b7280' },
-  { key: 'declinado', label: 'Declinado', color: '#ef4444' },
-  { key: 'sin_cobertura', label: 'Sin Cobertura', color: '#dc2626' },
+  { key: 'apertura',               label: 'Apertura del Caso',        color: '#6366f1' },
+  { key: 'coordinando_inspeccion', label: 'Coordinando Inspección',   color: '#f59e0b' },
+  { key: 'inspeccion_realizada',   label: 'Inspección Realizada',     color: '#8b5cf6' },
+  { key: 'resumen_enviado',        label: 'Resumen Enviado',          color: '#3b82f6' },
+  { key: 'docs_solicitados',       label: 'Docs. Solicitados',        color: '#f97316' },
+  { key: 'docs_parciales',         label: 'Docs. Parciales',          color: '#eab308' },
+  { key: 'docs_completos',         label: 'Docs. Completos',          color: '#10b981' },
+  { key: 'en_ajuste',              label: 'En Ajuste',                color: '#06b6d4' },
+  { key: 'convenio_enviado',       label: 'Convenio Enviado',         color: '#8b5cf6' },
+  { key: 'informe_final_enviado',  label: 'Informe Final Enviado',    color: '#22c55e' },
+  { key: 'cerrado',                label: 'Cerrado ✓',                color: '#6b7280' },
+  { key: 'declinado',              label: 'Declinado',                color: '#ef4444' },
+  { key: 'sin_cobertura',          label: 'Sin Cobertura',            color: '#dc2626' },
 ] as const
 
 export const STATUS_MAP = Object.fromEntries(STATUSES.map(s => [s.key, s]))
+
+/** Pasos principales del pipeline en orden (para el checklist) */
+export const PIPELINE_MAIN_STEPS = [
+  'apertura',
+  'coordinando_inspeccion',
+  'inspeccion_realizada',
+  'resumen_enviado',
+  'docs_solicitados',
+  'docs_parciales',
+  'docs_completos',
+  'en_ajuste',
+  'convenio_enviado',
+  'informe_final_enviado',
+  'cerrado',
+] as const
+
+/** Estados que indican cierre sin indemnización */
+export const TERMINAL_STATUSES = ['declinado', 'sin_cobertura'] as const
+
+/** Etapas donde el cuadro de ajuste es relevante */
+export const AJUSTE_STATUSES = ['en_ajuste', 'convenio_enviado', 'informe_final_enviado', 'cerrado']
+
+/** Etiquetas legibles para el historial de cambios */
+export const FIELD_LABELS: Record<string, string> = {
+  reclamo:             'Reclamo No.',
+  asegurado:           'Asegurado',
+  aseguradora:         'Aseguradora',
+  tipo_poliza:         'Tipo de Póliza',
+  poliza_no:           'Póliza No.',
+  intermediario:       'Intermediario',
+  intermediario_email: 'Email Intermediario',
+  intermediario_tel:   'Tel. Intermediario',
+  fecha_siniestro:     'Fecha Siniestro',
+  fecha_asignacion:    'Fecha Asignación',
+  fecha_inspeccion:    'Fecha Inspección',
+  vigencia:            'Vigencia',
+  suma_asegurada:      'Suma Asegurada',
+  deducible:           'Deducible',
+  causa:               'Causa',
+  reserva:             'Reserva',
+  ubicacion_riesgo:    'Ubicación Riesgo',
+  giro_negocio:        'Giro del Negocio',
+  narrativa:           'Narrativa',
+  notas:               'Notas Internas',
+  receptor_inspeccion: 'Receptor Inspección',
+  receptor_cedula:     'Cédula Receptor',
+  receptor_cargo:      'Cargo Receptor',
+  status:              'Estatus',
+  assigned_to:         'Asignado a',
+}
 
 export const ASEGURADORAS = [
   'Seguros Universal, S.A.',
@@ -43,28 +93,29 @@ export const TIPOS_POLIZA = [
 ]
 
 export const DOC_CATEGORIES = [
-  { key: 'poliza', label: 'Póliza' },
-  { key: 'apoderamiento', label: 'Apoderamiento' },
-  { key: 'acta_policial', label: 'Acta Policial' },
-  { key: 'informe_tecnico', label: 'Informe Técnico' },
-  { key: 'cotizacion', label: 'Cotización' },
-  { key: 'factura', label: 'Factura' },
-  { key: 'foto_inspeccion', label: 'Fotos Inspección' },
-  { key: 'carta_asegurado', label: 'Carta del Asegurado' },
-  { key: 'registro_mercantil', label: 'Registro Mercantil' },
-  { key: 'cedula', label: 'Cédula' },
-  { key: 'relacion_perdida', label: 'Relación de Pérdida' },
-  { key: 'convenio_firmado', label: 'Convenio Firmado' },
-  { key: 'cuadro_ajuste', label: 'Cuadro de Ajuste' },
-  { key: 'informe', label: 'Informe' },
-  { key: 'email', label: 'Email/Correo' },
-  { key: 'descargo', label: 'Descargo' },
-  { key: 'otro', label: 'Otro' },
+  { key: 'poliza',            label: 'Póliza' },
+  { key: 'condiciones',       label: 'Condiciones Particulares' },
+  { key: 'apoderamiento',     label: 'Apoderamiento' },
+  { key: 'acta_policial',     label: 'Acta Policial' },
+  { key: 'informe_tecnico',   label: 'Informe Técnico' },
+  { key: 'cotizacion',        label: 'Cotización' },
+  { key: 'factura',           label: 'Factura' },
+  { key: 'foto_inspeccion',   label: 'Fotos Inspección' },
+  { key: 'carta_asegurado',   label: 'Carta del Asegurado' },
+  { key: 'registro_mercantil',label: 'Registro Mercantil' },
+  { key: 'cedula',            label: 'Cédula' },
+  { key: 'relacion_perdida',  label: 'Relación de Pérdida' },
+  { key: 'convenio_firmado',  label: 'Convenio Firmado' },
+  { key: 'cuadro_ajuste',     label: 'Cuadro de Ajuste' },
+  { key: 'informe',           label: 'Informe' },
+  { key: 'email',             label: 'Email/Correo' },
+  { key: 'descargo',          label: 'Descargo' },
+  { key: 'otro',              label: 'Otro' },
 ]
 
 export const EMPRESA = {
-  nombre: 'Medina Tasadores, SRL.',
-  rnc: '101-77092-9',
+  nombre:    'Medina Tasadores, SRL.',
+  rnc:       '101-77092-9',
   direccion: 'Av. Yapur Dumit, Plaza Ary, Primer Nivel Módulo 103, Santiago de los Caballeros, Rep. Dom.',
-  telefono: '(809) 233-6838/40',
+  telefono:  '(809) 233-6838/40',
 }
