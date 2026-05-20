@@ -1,28 +1,53 @@
 'use client'
-import { useState, useEffect, useCallback, use } from 'react'
+import { useState, useEffect, useCallback, use, useRef } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { useRouter } from 'next/navigation'
-import { STATUSES, STATUS_MAP, ASEGURADORAS, TIPOS_POLIZA, EMPRESA } from '@/lib/constants'
+import {
+  STATUSES, STATUS_MAP, ASEGURADORAS, TIPOS_POLIZA, EMPRESA,
+  PIPELINE_MAIN_STEPS, TERMINAL_STATUSES, AJUSTE_STATUSES, FIELD_LABELS,
+} from '@/lib/constants'
 import StatusBadge from '@/components/StatusBadge'
 import DownloadDocxButton from '@/components/DownloadDocxButton'
 import type { DocType } from '@/lib/docx-generator'
 
+// ─── TIPOS ───────────────────────────────────────────────────────────────────
+
+const DOC_TYPE_MAP: Record<string, DocType> = {
+  reporte_inspeccion:  'resumen_inspeccion',
+  informe_preliminar:  'informe_preliminar',
+  informe_final:       'informe_final',
+  convenio_ajuste:     'convenio_ajuste',
+  carta_declinacion:   'carta_declinacion',
+  informe_cierre:      'informe_cierre',
+}
+
+// ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
+
 export default function CaseDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const [c, setC] = useState<any>(null)
-  const [profiles, setProfiles] = useState<any[]>([])
-  const [activity, setActivity] = useState<any[]>([])
-  const [profile, setProfile] = useState<any>(null)
-  const [loading, setLoading] = useState(true)
-  const [saveStatus, setSaveStatus] = useState('saved')
+  const [c, setC]                       = useState<any>(null)
+  const [profiles, setProfiles]         = useState<any[]>([])
+  const [activity, setActivity]         = useState<any[]>([])
+  const [profile, setProfile]           = useState<any>(null)
+  const [loading, setLoading]           = useState(true)
+  const [saveStatus, setSaveStatus]     = useState('saved')
   const [showStatusDD, setShowStatusDD] = useState(false)
-  const [generating, setGenerating] = useState(false)
-  const [genResult, setGenResult] = useState('')
-  const [genTitle, setGenTitle] = useState('')
+  const [generating, setGenerating]     = useState(false)
+  const [genResult, setGenResult]       = useState('')
+  const [genTitle, setGenTitle]         = useState('')
   const [showGenModal, setShowGenModal] = useState(false)
-  const [savedDocs, setSavedDocs] = useState<any[]>([])
-  const supabase = createClient()
-  const router = useRouter()
+  const [savedDocs, setSavedDocs]       = useState<any[]>([])
+  // New state
+  const [uploadingPoliza, setUploadingPoliza]   = useState(false)
+  const [extractingPoliza, setExtractingPoliza] = useState(false)
+  const [polizaMsg, setPolizaMsg]               = useState('')
+  const [cuadroData, setCuadroData]             = useState<any[][]|null>(null)
+  const [uploadingCuadro, setUploadingCuadro]   = useState(false)
+
+  const polizaRef = useRef<HTMLInputElement>(null)
+  const cuadroRef = useRef<HTMLInputElement>(null)
+  const supabase  = createClient()
+  const router    = useRouter()
   let saveTimer: any = null
 
   useEffect(() => {
@@ -36,7 +61,10 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
       const { data: caseData } = await supabase.from('cases').select('*').eq('id', id).single()
       if (!caseData) { router.push('/dashboard'); return }
       setC(caseData)
-      const { data: acts } = await supabase.from('case_activity').select('*, profiles(short_name)').eq('case_id', id).order('created_at', { ascending: false }).limit(20)
+      if (caseData.cuadro_ajuste_json) {
+        try { setCuadroData(JSON.parse(caseData.cuadro_ajuste_json)) } catch {}
+      }
+      const { data: acts } = await supabase.from('case_activity').select('*, profiles(short_name)').eq('case_id', id).order('created_at', { ascending: false }).limit(30)
       setActivity(acts || [])
       const { data: docs } = await supabase.from('generated_documents').select('*').eq('case_id', id).order('created_at', { ascending: false })
       setSavedDocs(docs || [])
@@ -45,15 +73,30 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
     load()
   }, [id])
 
+  // ─── updateField con historial de cambios ──────────────────────────────────
+
   const updateField = useCallback((field: string, value: string) => {
-    setC((prev: any) => ({ ...prev, [field]: value }))
-    setSaveStatus('saving')
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(async () => {
-      await supabase.from('cases').update({ [field]: value || null }).eq('id', id)
-      setSaveStatus('saved')
-    }, 800)
-  }, [id])
+    setC((prev: any) => {
+      const oldValue = prev?.[field] || ''
+      clearTimeout(saveTimer)
+      saveTimer = setTimeout(async () => {
+        await supabase.from('cases').update({ [field]: value || null }).eq('id', id)
+        // Registrar cambio en historial (solo si el valor cambió)
+        if (oldValue !== value && profile?.id) {
+          const label = FIELD_LABELS[field] || field
+          await supabase.from('case_activity').insert({
+            case_id: id, user_id: profile.id,
+            action: 'Campo actualizado',
+            details: `${label} → "${value || '—'}"`,
+          })
+          refreshActivity()
+        }
+        setSaveStatus('saved')
+      }, 800)
+      setSaveStatus('saving')
+      return { ...prev, [field]: value }
+    })
+  }, [id, profile])
 
   async function setStatus(status: string) {
     setC((prev: any) => ({ ...prev, status }))
@@ -61,26 +104,141 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
     await supabase.from('cases').update({ status }).eq('id', id)
     await supabase.from('case_activity').insert({
       case_id: id, user_id: profile?.id,
-      action: 'Cambio de estatus', details: `→ ${STATUS_MAP[status]?.label || status}`
+      action: 'Estatus cambiado',
+      details: `→ ${STATUS_MAP[status]?.label || status}`,
     })
     refreshActivity()
     setSaveStatus('saved')
   }
 
   async function refreshActivity() {
-    const { data } = await supabase.from('case_activity').select('*, profiles(short_name)').eq('case_id', id).order('created_at', { ascending: false }).limit(20)
+    const { data } = await supabase.from('case_activity').select('*, profiles(short_name)').eq('case_id', id).order('created_at', { ascending: false }).limit(30)
     setActivity(data || [])
   }
 
+  // ─── Póliza: subir y extraer ───────────────────────────────────────────────
+
+  async function handlePolizaUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadingPoliza(true)
+    setPolizaMsg('Subiendo archivo...')
+
+    try {
+      const filePath = `${id}/poliza/${file.name}`
+      const { error: upErr } = await supabase.storage.from('expedientes').upload(filePath, file, { upsert: true })
+      if (upErr) throw upErr
+
+      const { data: urlData } = supabase.storage.from('expedientes').getPublicUrl(filePath)
+      await supabase.from('cases').update({ poliza_doc_url: urlData.publicUrl, poliza_doc_name: file.name }).eq('id', id)
+      setC((prev: any) => ({ ...prev, poliza_doc_url: urlData.publicUrl, poliza_doc_name: file.name }))
+
+      await supabase.from('case_activity').insert({ case_id: id, user_id: profile?.id, action: 'Condiciones particulares cargadas', details: file.name })
+      refreshActivity()
+
+      // Auto-extract if PDF
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        setUploadingPoliza(false)
+        setExtractingPoliza(true)
+        setPolizaMsg('Extrayendo datos con IA...')
+        await extractPolizaData(file)
+      } else {
+        setPolizaMsg('✅ Archivo guardado')
+      }
+    } catch (err: any) {
+      setPolizaMsg('⚠️ Error: ' + (err.message || 'No se pudo subir el archivo'))
+    }
+    setUploadingPoliza(false)
+    setExtractingPoliza(false)
+  }
+
+  async function extractPolizaData(file: File) {
+    try {
+      const reader = new FileReader()
+      const base64 = await new Promise<string>((res) => {
+        reader.onload = (ev) => res((ev.target?.result as string).split(',')[1])
+        reader.readAsDataURL(file)
+      })
+      const resp = await fetch('/api/extract-poliza', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileBase64: base64, fileType: file.type, fileName: file.name }),
+      })
+      const data = await resp.json()
+      if (!data.error) {
+        const fieldMap: Record<string, string> = {
+          vigencia: 'vigencia', suma_asegurada: 'suma_asegurada',
+          deducible: 'deducible', giro_negocio: 'giro_negocio',
+          ubicacion_riesgo: 'ubicacion_riesgo', intermediario: 'intermediario',
+        }
+        const updates: Record<string, string> = {}
+        for (const [k, v] of Object.entries(fieldMap)) {
+          if (data[k] && !c?.[v]) { updates[v] = data[k]; updateField(v, data[k]) }
+        }
+        const count = Object.keys(updates).length
+        setPolizaMsg(count > 0 ? `✅ ${count} campos completados automáticamente` : '✅ Póliza procesada')
+        if (count > 0) {
+          await supabase.from('case_activity').insert({ case_id: id, user_id: profile?.id, action: 'Datos extraídos de póliza', details: `Campos: ${Object.keys(updates).join(', ')}` })
+          refreshActivity()
+        }
+      } else {
+        setPolizaMsg('⚠️ ' + data.error)
+      }
+    } catch {
+      setPolizaMsg('⚠️ No se pudo extraer datos del archivo')
+    }
+  }
+
+  // ─── Cuadro de Ajuste ──────────────────────────────────────────────────────
+
+  async function handleCuadroUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadingCuadro(true)
+
+    try {
+      let data: any[][] = []
+
+      if (file.name.endsWith('.csv')) {
+        const text = await file.text()
+        data = text.split('\n').map(r => r.split(',').map(c => c.trim().replace(/^"(.*)"$/, '$1')))
+      } else {
+        const XLSX = await import('xlsx')
+        const ab = await file.arrayBuffer()
+        const wb = XLSX.read(ab, { type: 'array' })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        data = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][]
+      }
+
+      const clean = data.filter(r => r.some(c => c !== '' && c != null))
+      setCuadroData(clean)
+
+      const jsonStr = JSON.stringify(clean)
+      await supabase.from('cases').update({ cuadro_ajuste_json: jsonStr, cuadro_ajuste_nombre: file.name }).eq('id', id)
+      setC((prev: any) => ({ ...prev, cuadro_ajuste_json: jsonStr, cuadro_ajuste_nombre: file.name }))
+
+      await supabase.from('case_activity').insert({ case_id: id, user_id: profile?.id, action: 'Cuadro de ajuste cargado', details: file.name })
+      refreshActivity()
+    } catch (err: any) {
+      alert('Error al procesar el archivo: ' + (err.message || 'Verifica que sea un archivo Excel o CSV válido.'))
+    }
+    setUploadingCuadro(false)
+  }
+
+  // ─── Generación de documentos ──────────────────────────────────────────────
+
   function buildContext() {
     if (!c || !profile) return ''
-    const s = STATUS_MAP[c.status] || { label: c.status }
+    const st = STATUS_MAP[c.status] || { label: c.status }
     const firma = profile.role === 'director'
       ? 'Solo: EDDY S. MEDINA PUJOLS / Medina Tasadores, SRL.'
       : 'Izquierda: EDDY S. MEDINA PUJOLS / Medina Tasadores, SRL.\nDerecha: CARLOS J. GONZÁLEZ. V / Ajustador Actuante'
     const firmaMail = profile.role === 'director'
-      ? 'Eddy S. Medina Pujols | Director | Medina Tasadores, SRL. | Av. Yapur Dumit, Plaza Ary, Primer Nivel Modulo 103, Santiago de los Caballeros, Rep. Dom. | Oficina: (809) 233-6838/40'
-      : 'Carlos Junior González Ventura | Ajustador Ramos Técnicos | Medina Tasadores, SRL. | Av. Yapur Dumit, Plaza Ary, Primer Nivel Modulo 103, Santiago de los Caballeros, Rep. Dom. | Oficina: (809) 233-6838/40 | Cel.: 849-255-9276 | Email: cgonzalez.medinatasadores@gmail.com'
+      ? 'Eddy S. Medina Pujols | Director | Medina Tasadores, SRL.'
+      : 'Carlos Junior González Ventura | Ajustador Ramos Técnicos | Medina Tasadores, SRL. | Cel.: 849-255-9276'
+    const cuadroCtx = cuadroData
+      ? `\nCUADRO DE AJUSTE (${c.cuadro_ajuste_nombre || 'Excel'}):\n${cuadroData.map(r => r.join('\t')).join('\n')}`
+      : ''
     return [
       `CASO — MEDINA TASADORES, SRL.`,
       `Ajustador: ${profile.full_name} (${profile.role})`,
@@ -91,19 +249,20 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
       `Aseguradora: ${c.aseguradora || '—'}`,
       `Tipo de Póliza: ${c.tipo_poliza || '—'}`,
       `Póliza No.: ${c.poliza_no || '—'}`,
+      `Vigencia: ${c.vigencia || '—'}`,
       `Intermediario: ${c.intermediario || '—'}`,
       `Fecha Siniestro: ${c.fecha_siniestro || '—'}`,
       `Fecha Asignación: ${c.fecha_asignacion || '—'}`,
-      `Fecha Inspección: ${c.fecha_inspeccion || '—'}`,
       `Suma Asegurada: ${c.suma_asegurada || '—'}`,
       `Deducible: ${c.deducible || '—'}`,
       `Causa: ${c.causa || '—'}`,
       `Reserva Estimada: ${c.reserva || '—'}`,
       `Ubicación del Riesgo: ${c.ubicacion_riesgo || '—'}`,
       `Giro del Negocio: ${c.giro_negocio || '—'}`,
-      `Estatus: ${s.label}`,
+      `Estatus: ${st.label}`,
       c.narrativa ? `\nNARRATIVA DEL SINIESTRO:\n${c.narrativa}` : '',
       c.notas ? `\nNOTAS INTERNAS:\n${c.notas}` : '',
+      cuadroCtx,
     ].filter(Boolean).join('\n')
   }
 
@@ -113,11 +272,7 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
       document.getElementById('narrativa-field')?.focus()
       return
     }
-    setGenTitle(title)
-    setGenResult('')
-    setShowGenModal(true)
-    setGenerating(true)
-
+    setGenTitle(title); setGenResult(''); setShowGenModal(true); setGenerating(true)
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -125,34 +280,19 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
         body: JSON.stringify({ context: buildContext(), action, docType }),
       })
       const data = await res.json()
-      if (data.error) {
-        setGenResult(`Error: ${data.error}`)
-      } else {
+      if (data.error) { setGenResult(`Error: ${data.error}`) } else {
         setGenResult(data.content)
-        // Save to database
-        await supabase.from('generated_documents').insert({
-          case_id: id, created_by: profile?.id,
-          doc_type: docType, title, content: data.content,
-        })
-        await supabase.from('case_activity').insert({
-          case_id: id, user_id: profile?.id,
-          action: 'Documento generado', details: title,
-        })
+        await supabase.from('generated_documents').insert({ case_id: id, created_by: profile?.id, doc_type: docType, title, content: data.content })
+        await supabase.from('case_activity').insert({ case_id: id, user_id: profile?.id, action: 'Documento generado', details: title })
         refreshActivity()
         const { data: docs } = await supabase.from('generated_documents').select('*').eq('case_id', id).order('created_at', { ascending: false })
         setSavedDocs(docs || [])
       }
-    } catch (e: any) {
-      setGenResult(`Error de conexión: ${e.message}`)
-    }
+    } catch (e: any) { setGenResult(`Error de conexión: ${e.message}`) }
     setGenerating(false)
   }
 
-  function viewDoc(doc: any) {
-    setGenTitle(doc.title)
-    setGenResult(doc.content)
-    setShowGenModal(true)
-  }
+  function viewDoc(doc: any) { setGenTitle(doc.title); setGenResult(doc.content); setShowGenModal(true) }
 
   async function copyText(text: string) {
     try { await navigator.clipboard.writeText(text) } catch {
@@ -165,248 +305,451 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
     setTimeout(() => setSaveStatus('saved'), 2000)
   }
 
-  if (loading) return <div className="flex items-center justify-center p-20 text-slate-400 text-sm">Cargando caso...</div>
+  if (loading) return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'60vh', color:'#94a3b8', fontSize:'14px' }}>
+      <div style={{ textAlign:'center' }}>
+        <div style={{ fontSize:'32px', marginBottom:'12px' }}>⏳</div>
+        Cargando caso...
+      </div>
+    </div>
+  )
   if (!c) return null
 
-  const st = STATUS_MAP[c.status] || { label: c.status, color: '#64748b' }
+  const st      = STATUS_MAP[c.status] || { label: c.status, color: '#64748b' }
   const hasNarr = c.narrativa && c.narrativa.trim().length >= 20
-  const inp = "w-full px-2 py-1 border border-slate-200 rounded text-xs focus:border-blue-500 focus:outline-none mb-2"
-  const inpF = "w-full px-2 py-1 border border-emerald-300 rounded text-xs focus:border-blue-500 focus:outline-none mb-2 bg-emerald-50"
-  const lbl = "text-[10px] font-semibold text-slate-400 mb-0.5 block"
+  const isAjuste = AJUSTE_STATUSES.includes(c.status)
+  const isTerminal = TERMINAL_STATUSES.includes(c.status)
+
+  // Pipeline checklist index
+  const pipelineIdx = PIPELINE_MAIN_STEPS.indexOf(c.status as any)
+
+  // Styles
+  const inp  = { width:'100%', padding:'5px 8px', border:'1px solid #e2e8f0', borderRadius:'6px', fontSize:'11px', color:'#0f172a', outline:'none', backgroundColor:'white', boxSizing:'border-box' as const, marginBottom:'6px' }
+  const inpF = { ...inp, borderColor:'#86efac', backgroundColor:'#f0fdf4' }
+  const lbl  = { display:'block' as const, fontSize:'9px', fontWeight:700 as const, color:'#94a3b8', textTransform:'uppercase' as const, letterSpacing:'0.05em', marginBottom:'3px', marginTop:'10px' }
 
   const docActions = [
-    { title: 'Email: Coordinar Inspección', action: 'Genera el email completo de COORDINAR INSPECCIÓN para el intermediario. Incluye asunto en mayúsculas y cuerpo completo con firma.', type: 'email_coordinar', req: false },
-    { title: 'Reporte de Inspección', action: 'Genera el REPORTE DE INSPECCIÓN SINIESTRO completo de 1 página con todos los datos disponibles del caso.', type: 'reporte_inspeccion', req: true },
-    { title: 'Informe Preliminar', action: 'Genera el INFORME PRELIMINAR completo con todas las secciones. Si no tienes datos para Entorno o Construcción, escribe "Por determinar".', type: 'informe_preliminar', req: true },
-    { title: 'Informe Final', action: 'Genera el INFORME FINAL completo con todas las secciones incluyendo Relación de Pérdida, Ajuste e Indemnización.', type: 'informe_final', req: true },
-    { title: 'Convenio de Ajuste', action: 'Genera el CONVENIO DE AJUSTE según el formato de la aseguradora del caso. Si es Mapfre, indica que Mapfre emite su propio convenio.', type: 'convenio_ajuste', req: true },
-    { title: 'Solicitud de Documentos', action: 'Genera el email de SOLICITUD DE DOCUMENTOS con los documentos estándar y los específicos según el tipo de siniestro. Incluye OBSERVACIÓN y NOTA de salvamento.', type: 'email_solicitud_docs', req: false },
-    { title: 'Email: Docs Pendientes', action: 'Genera el email de DOCUMENTOS PENDIENTES.', type: 'email_docs_pendientes', req: false },
-    { title: 'Email: Aviso Recordatorio', action: 'Genera el email de AVISO RECORDATORIO de documentos pendientes.', type: 'email_recordatorio', req: false },
-    { title: 'Email: Plazo 10 Días', action: 'Genera el email de PLAZO PARA REMITIR DOCUMENTOS (10 días laborables).', type: 'email_plazo', req: false },
-    { title: 'Email: Docs Completos', action: 'Genera el email de RECEPCIÓN DE DOCUMENTACIÓN COMPLETA.', type: 'email_docs_completos', req: false },
-    { title: 'Email: Enviar Convenio', action: 'Genera el email de envío del CONVENIO DE AJUSTE al intermediario.', type: 'email_convenio', req: false },
-    { title: 'Email: Informe Final', action: 'Genera el email de envío del INFORME FINAL con todos los anexos.', type: 'email_informe_final', req: false },
-    { title: 'Carta Declinación', action: 'Genera la CARTA DE DECLINACIÓN al asegurado vía intermediario.', type: 'carta_declinacion', req: true },
-    { title: 'Informe de Cierre', action: 'Genera el INFORME DE CIERRE a la aseguradora.', type: 'informe_cierre', req: true },
-    { title: 'Descargo Legal RC', action: 'Genera el DESCARGO LEGAL (Liberación y Descargo) para el reclamante en caso de RC.', type: 'descargo_legal', req: true },
-    { title: 'Resumen del Caso', action: 'Dame un resumen completo del estado actual del caso, datos disponibles y pasos pendientes.', type: 'email_resumen', req: false },
+    { title:'Email: Coordinar Inspección', action:'Genera el email completo de COORDINAR INSPECCIÓN para el intermediario. Incluye asunto en mayúsculas y cuerpo completo con firma.', type:'email_coordinar', req:false },
+    { title:'Reporte de Inspección',       action:'Genera el REPORTE DE INSPECCIÓN SINIESTRO completo de 1 página con todos los datos disponibles del caso.',                        type:'reporte_inspeccion', req:true },
+    { title:'Informe Preliminar',          action:'Genera el INFORME PRELIMINAR completo con todas las secciones.',                                                                  type:'informe_preliminar', req:true },
+    { title:'Informe Final',               action:'Genera el INFORME FINAL completo con todas las secciones incluyendo Relación de Pérdida, Ajuste e Indemnización.',               type:'informe_final', req:true },
+    { title:'Convenio de Ajuste',          action:'Genera el CONVENIO DE AJUSTE según el formato de la aseguradora del caso. Si es Mapfre, indica que Mapfre emite su propio convenio.', type:'convenio_ajuste', req:true },
+    { title:'Solicitud de Documentos',     action:'Genera el email de SOLICITUD DE DOCUMENTOS con los documentos estándar.',                                                         type:'email_solicitud_docs', req:false },
+    { title:'Email: Docs Pendientes',      action:'Genera el email de DOCUMENTOS PENDIENTES.',                                                                                       type:'email_docs_pendientes', req:false },
+    { title:'Email: Recordatorio',         action:'Genera el email de AVISO RECORDATORIO.',                                                                                          type:'email_recordatorio', req:false },
+    { title:'Email: Plazo 10 Días',        action:'Genera el email de PLAZO PARA REMITIR DOCUMENTOS (10 días laborables).',                                                          type:'email_plazo', req:false },
+    { title:'Email: Docs Completos',       action:'Genera el email de RECEPCIÓN DE DOCUMENTACIÓN COMPLETA.',                                                                         type:'email_docs_completos', req:false },
+    { title:'Email: Enviar Convenio',      action:'Genera el email de envío del CONVENIO DE AJUSTE al intermediario.',                                                               type:'email_convenio', req:false },
+    { title:'Email: Informe Final',        action:'Genera el email de envío del INFORME FINAL con todos los anexos.',                                                               type:'email_informe_final', req:false },
+    { title:'Carta Declinación',           action:'Genera la CARTA DE DECLINACIÓN al asegurado vía intermediario.',                                                                  type:'carta_declinacion', req:true },
+    { title:'Informe de Cierre',           action:'Genera el INFORME DE CIERRE a la aseguradora.',                                                                                   type:'informe_cierre', req:true },
+    { title:'Descargo Legal RC',           action:'Genera el DESCARGO LEGAL (Liberación y Descargo) para el reclamante en caso de RC.',                                              type:'descargo_legal', req:true },
+    { title:'Resumen del Caso',            action:'Dame un resumen completo del estado actual del caso, datos disponibles y pasos pendientes.',                                       type:'email_resumen', req:false },
   ]
 
-  const DOC_TYPE_MAP: Record<string, DocType> = {
-    'reporte_inspeccion': 'resumen_inspeccion',
-    'informe_preliminar': 'informe_preliminar',
-    'informe_final':      'informe_final',
-    'convenio_ajuste':    'convenio_ajuste',
-    'carta_declinacion':  'carta_declinacion',
-    'informe_cierre':     'informe_cierre',
-  }
-
   const caseDataForDocx = {
-    asegurado:           c.asegurado,
-    aseguradora:         c.aseguradora,
-    reclamo:             c.reclamo,
-    poliza_no:           c.poliza_no,
-    tipo_poliza:         c.tipo_poliza,
-    fecha_siniestro:     c.fecha_siniestro,
-    fecha_asignacion:    c.fecha_asignacion,
-    fecha_inspeccion:    c.fecha_inspeccion,
-    vigencia:            c.vigencia,
-    causa:               c.causa,
-    suma_asegurada:      c.suma_asegurada,
-    deducible:           c.deducible,
-    intermediario:       c.intermediario,
-    att_nombre:          c.att_nombre,
-    att_cargo:           c.att_cargo,
-    ubicacion_riesgo:    c.ubicacion_riesgo,
-    giro_negocio:        c.giro_negocio,
-    receptor_inspeccion: c.receptor_inspeccion,
-    receptor_cargo:      c.receptor_cargo,
-    reserva:             c.reserva,
+    asegurado: c.asegurado, aseguradora: c.aseguradora, reclamo: c.reclamo,
+    poliza_no: c.poliza_no, tipo_poliza: c.tipo_poliza, fecha_siniestro: c.fecha_siniestro,
+    fecha_asignacion: c.fecha_asignacion, fecha_inspeccion: c.fecha_inspeccion,
+    vigencia: c.vigencia, causa: c.causa, suma_asegurada: c.suma_asegurada,
+    deducible: c.deducible, intermediario: c.intermediario, att_nombre: c.att_nombre,
+    att_cargo: c.att_cargo, ubicacion_riesgo: c.ubicacion_riesgo, giro_negocio: c.giro_negocio,
+    receptor_inspeccion: c.receptor_inspeccion, receptor_cargo: c.receptor_cargo, reserva: c.reserva,
   }
 
   return (
     <>
-    <div className="flex h-[calc(100vh-100px)]">
-      {/* LEFT PANEL */}
-      <div className="w-72 bg-white border-r border-slate-200 overflow-y-auto flex-shrink-0 p-3">
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-[10px] font-bold text-slate-400 uppercase font-mono tracking-wide">Datos del Caso</span>
-          <span className="text-[10px] font-mono" style={{ color: saveStatus === 'saved' ? '#059669' : saveStatus === 'saving' ? '#d97706' : '#3b82f6' }}>
-            {saveStatus === 'saved' ? '✓ Guardado' : saveStatus === 'saving' ? '⏳ Guardando...' : saveStatus}
-          </span>
+    <div style={{ display:'flex', height:'calc(100vh - 60px)', backgroundColor:'#f8fafc' }}>
+
+      {/* ── LEFT PANEL ───────────────────────────────────────────────────── */}
+      <div style={{ width:'270px', backgroundColor:'white', borderRight:'1px solid #e2e8f0', overflowY:'auto', flexShrink:0, display:'flex', flexDirection:'column' }}>
+
+        {/* Case header */}
+        <div style={{ padding:'16px', background:'linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 100%)', color:'white' }}>
+          <div style={{ fontSize:'10px', opacity:0.7, marginBottom:'4px', textTransform:'uppercase', letterSpacing:'0.08em' }}>
+            {c.reclamo ? `Reclamo ${c.reclamo}` : 'Sin número'}
+          </div>
+          <div style={{ fontSize:'14px', fontWeight:700, lineHeight:1.3, marginBottom:'8px' }}>{c.asegurado || '—'}</div>
+          <div style={{ display:'inline-flex', alignItems:'center', gap:'6px', backgroundColor:'rgba(255,255,255,0.15)', borderRadius:'20px', padding:'3px 10px', fontSize:'11px', fontWeight:600 }}>
+            <span style={{ width:'6px', height:'6px', borderRadius:'50%', backgroundColor:'white', display:'inline-block' }} />
+            {st.label}
+          </div>
         </div>
 
-        <label className={lbl}>Reclamo No.</label><input className={c.reclamo ? inpF : inp} value={c.reclamo||''} onChange={e=>updateField('reclamo',e.target.value)} />
-        <label className={lbl}>Asegurado</label><input className={c.asegurado ? inpF : inp} value={c.asegurado||''} onChange={e=>updateField('asegurado',e.target.value)} />
-        <label className={lbl}>Aseguradora</label>
-        <select className={c.aseguradora ? inpF : inp} value={c.aseguradora||''} onChange={e=>updateField('aseguradora',e.target.value)}>
-          <option value="">—</option>{ASEGURADORAS.map(a=><option key={a}>{a}</option>)}
-        </select>
-        <label className={lbl}>Tipo de Póliza</label>
-        <select className={c.tipo_poliza ? inpF : inp} value={c.tipo_poliza||''} onChange={e=>updateField('tipo_poliza',e.target.value)}>
-          <option value="">—</option>{TIPOS_POLIZA.map(t=><option key={t}>{t}</option>)}
-        </select>
-        <label className={lbl}>Póliza No.</label><input className={c.poliza_no ? inpF : inp} value={c.poliza_no||''} onChange={e=>updateField('poliza_no',e.target.value)} />
-        <label className={lbl}>Intermediario</label><input className={c.intermediario ? inpF : inp} value={c.intermediario||''} onChange={e=>updateField('intermediario',e.target.value)} />
-        <label className={lbl}>Fecha Siniestro</label><input type="date" className={c.fecha_siniestro ? inpF : inp} value={c.fecha_siniestro||''} onChange={e=>updateField('fecha_siniestro',e.target.value)} />
-        <label className={lbl}>Fecha Asignación</label><input type="date" className={c.fecha_asignacion ? inpF : inp} value={c.fecha_asignacion||''} onChange={e=>updateField('fecha_asignacion',e.target.value)} />
-        <label className={lbl}>Fecha Inspección</label><input type="date" className={c.fecha_inspeccion ? inpF : inp} value={c.fecha_inspeccion||''} onChange={e=>updateField('fecha_inspeccion',e.target.value)} />
-        <label className={lbl}>Suma Asegurada</label><input className={c.suma_asegurada ? inpF : inp} value={c.suma_asegurada||''} onChange={e=>updateField('suma_asegurada',e.target.value)} placeholder="RD$..." />
-        <label className={lbl}>Deducible</label><input className={c.deducible ? inpF : inp} value={c.deducible||''} onChange={e=>updateField('deducible',e.target.value)} placeholder="%/mín." />
-        <label className={lbl}>Causa</label><input className={c.causa ? inpF : inp} value={c.causa||''} onChange={e=>updateField('causa',e.target.value)} />
-        <label className={lbl}>Reserva</label><input className={c.reserva ? inpF : inp} value={c.reserva||''} onChange={e=>updateField('reserva',e.target.value)} placeholder="RD$..." />
-        <label className={lbl}>Ubicación Riesgo</label><input className={c.ubicacion_riesgo ? inpF : inp} value={c.ubicacion_riesgo||''} onChange={e=>updateField('ubicacion_riesgo',e.target.value)} />
-        <label className={lbl}>Giro del Negocio</label><input className={c.giro_negocio ? inpF : inp} value={c.giro_negocio||''} onChange={e=>updateField('giro_negocio',e.target.value)} />
-        <label className={lbl}>Asignado a</label>
-        <select className={inp} value={c.assigned_to||''} onChange={e=>updateField('assigned_to',e.target.value)}>
-          <option value="">Sin asignar</option>
-          {profiles.map(p=><option key={p.id} value={p.id}>{p.short_name} ({p.role})</option>)}
-        </select>
-        <label className={lbl}>Notas Internas</label>
-        <textarea className={c.notas ? inpF : inp} rows={3} value={c.notas||''} onChange={e=>updateField('notas',e.target.value)} style={{fontFamily:'inherit'}} />
+        {/* Save indicator */}
+        <div style={{ padding:'6px 16px', borderBottom:'1px solid #f1f5f9', fontSize:'10px', color: saveStatus==='saved'?'#16a34a' : saveStatus==='saving'?'#d97706' : '#2563eb' }}>
+          {saveStatus==='saved' ? '✓ Guardado' : saveStatus==='saving' ? '⏳ Guardando...' : saveStatus}
+        </div>
 
-        <div className="mt-4 pt-3 border-t border-slate-100">
-          <div className="text-[10px] font-bold text-slate-400 uppercase font-mono tracking-wide mb-2">Pipeline</div>
-          {STATUSES.slice(0,10).map(s=>(
-            <div key={s.key} className="flex items-center gap-2 mb-1 cursor-pointer hover:opacity-80" onClick={()=>setStatus(s.key)}>
-              <div className={`w-3.5 h-3.5 rounded-full border-2 flex-shrink-0`}
-                style={c.status===s.key ? {borderColor:s.color,background:s.color} : {borderColor:'#e2e8f0'}} />
-              <span className={`text-[11px] ${c.status===s.key?'font-bold':'text-slate-400'}`}
-                style={c.status===s.key?{color:s.color}:{}}>{s.label}</span>
+        {/* Fields */}
+        <div style={{ padding:'12px 14px', flex:1 }}>
+
+          <label style={lbl}>Reclamo No.</label>
+          <input style={c.reclamo ? inpF : inp} value={c.reclamo||''} onChange={e=>updateField('reclamo',e.target.value)} />
+          <label style={lbl}>Asegurado</label>
+          <input style={c.asegurado ? inpF : inp} value={c.asegurado||''} onChange={e=>updateField('asegurado',e.target.value)} />
+          <label style={lbl}>Aseguradora</label>
+          <select style={c.aseguradora ? inpF : inp} value={c.aseguradora||''} onChange={e=>updateField('aseguradora',e.target.value)}>
+            <option value="">—</option>{ASEGURADORAS.map(a=><option key={a}>{a}</option>)}
+          </select>
+          <label style={lbl}>Tipo de Póliza</label>
+          <select style={c.tipo_poliza ? inpF : inp} value={c.tipo_poliza||''} onChange={e=>updateField('tipo_poliza',e.target.value)}>
+            <option value="">—</option>{TIPOS_POLIZA.map(t=><option key={t}>{t}</option>)}
+          </select>
+          <label style={lbl}>Póliza No.</label>
+          <input style={c.poliza_no ? inpF : inp} value={c.poliza_no||''} onChange={e=>updateField('poliza_no',e.target.value)} />
+          <label style={lbl}>Vigencia</label>
+          <input style={c.vigencia ? inpF : inp} value={c.vigencia||''} onChange={e=>updateField('vigencia',e.target.value)} placeholder="01/01/2025 – 01/01/2026" />
+          <label style={lbl}>Intermediario</label>
+          <input style={c.intermediario ? inpF : inp} value={c.intermediario||''} onChange={e=>updateField('intermediario',e.target.value)} />
+          <label style={lbl}>Fecha Siniestro</label>
+          <input type="date" style={c.fecha_siniestro ? inpF : inp} value={c.fecha_siniestro||''} onChange={e=>updateField('fecha_siniestro',e.target.value)} />
+          <label style={lbl}>Fecha Asignación</label>
+          <input type="date" style={c.fecha_asignacion ? inpF : inp} value={c.fecha_asignacion||''} onChange={e=>updateField('fecha_asignacion',e.target.value)} />
+          <label style={lbl}>Fecha Inspección</label>
+          <input type="date" style={c.fecha_inspeccion ? inpF : inp} value={c.fecha_inspeccion||''} onChange={e=>updateField('fecha_inspeccion',e.target.value)} />
+          <label style={lbl}>Suma Asegurada</label>
+          <input style={c.suma_asegurada ? inpF : inp} value={c.suma_asegurada||''} onChange={e=>updateField('suma_asegurada',e.target.value)} placeholder="DOP..." />
+          <label style={lbl}>Deducible</label>
+          <input style={c.deducible ? inpF : inp} value={c.deducible||''} onChange={e=>updateField('deducible',e.target.value)} placeholder="%" />
+          <label style={lbl}>Causa</label>
+          <input style={c.causa ? inpF : inp} value={c.causa||''} onChange={e=>updateField('causa',e.target.value)} />
+          <label style={lbl}>Reserva Estimada</label>
+          <input style={c.reserva ? inpF : inp} value={c.reserva||''} onChange={e=>updateField('reserva',e.target.value)} placeholder="DOP..." />
+          <label style={lbl}>Ubicación Riesgo</label>
+          <input style={c.ubicacion_riesgo ? inpF : inp} value={c.ubicacion_riesgo||''} onChange={e=>updateField('ubicacion_riesgo',e.target.value)} />
+          <label style={lbl}>Giro del Negocio</label>
+          <input style={c.giro_negocio ? inpF : inp} value={c.giro_negocio||''} onChange={e=>updateField('giro_negocio',e.target.value)} />
+          <label style={lbl}>Receptor Inspección</label>
+          <input style={c.receptor_inspeccion ? inpF : inp} value={c.receptor_inspeccion||''} onChange={e=>updateField('receptor_inspeccion',e.target.value)} />
+          <label style={lbl}>Cargo Receptor</label>
+          <input style={c.receptor_cargo ? inpF : inp} value={c.receptor_cargo||''} onChange={e=>updateField('receptor_cargo',e.target.value)} />
+
+          <label style={lbl}>Asignado a</label>
+          <select style={inp} value={c.assigned_to||''} onChange={e=>updateField('assigned_to',e.target.value)}>
+            <option value="">Sin asignar</option>
+            {profiles.map(p=><option key={p.id} value={p.id}>{p.short_name} ({p.role})</option>)}
+          </select>
+
+          <label style={lbl}>Notas Internas</label>
+          <textarea style={{...inp, resize:'vertical'}} rows={3} value={c.notas||''} onChange={e=>updateField('notas',e.target.value)} />
+
+          {/* ── PIPELINE CHECKLIST ── */}
+          <div style={{ marginTop:'16px', paddingTop:'14px', borderTop:'1px solid #f1f5f9' }}>
+            <div style={{ fontSize:'9px', fontWeight:700, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'12px' }}>
+              Progreso del Caso
             </div>
-          ))}
+            <div style={{ position:'relative' }}>
+              {/* vertical line */}
+              <div style={{ position:'absolute', left:'8px', top:'4px', bottom:'4px', width:'1px', backgroundColor:'#e2e8f0' }} />
+
+              {PIPELINE_MAIN_STEPS.map((key, idx) => {
+                const step = STATUS_MAP[key]
+                if (!step) return null
+                const effectiveIdx = isTerminal ? -1 : pipelineIdx
+                const isDone    = idx < effectiveIdx || (key === 'cerrado' && c.status === 'cerrado')
+                const isCurrent = idx === effectiveIdx && !isTerminal && key !== 'cerrado'
+                return (
+                  <div key={key} onClick={() => setStatus(key)}
+                    style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'7px', position:'relative', zIndex:1, cursor:'pointer' }}
+                    title={`Cambiar a: ${step.label}`}
+                  >
+                    <div style={{ width:'17px', height:'17px', borderRadius:'50%', border:'2px solid', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.2s',
+                      borderColor: isDone ? '#16a34a' : isCurrent ? step.color : '#e2e8f0',
+                      backgroundColor: isDone ? '#16a34a' : isCurrent ? step.color : 'white',
+                    }}>
+                      {isDone  && <span style={{ color:'white', fontSize:'8px', fontWeight:900 }}>✓</span>}
+                      {isCurrent && <span style={{ width:'5px', height:'5px', borderRadius:'50%', backgroundColor:'white', display:'block' }} />}
+                    </div>
+                    <span style={{ fontSize:'10px', lineHeight:1.3, transition:'color 0.2s',
+                      color: isDone ? '#94a3b8' : isCurrent ? '#0f172a' : '#94a3b8',
+                      fontWeight: isCurrent ? 700 : 400,
+                      textDecoration: isDone ? 'line-through' : 'none',
+                    }}>
+                      {step.label}
+                    </span>
+                  </div>
+                )
+              })}
+
+              {/* Terminal statuses */}
+              <div style={{ marginTop:'10px', paddingTop:'10px', borderTop:'1px dashed #fecaca' }}>
+                <div style={{ fontSize:'9px', color:'#fca5a5', fontWeight:600, marginBottom:'6px' }}>Cierre sin pago</div>
+                {TERMINAL_STATUSES.map(key => {
+                  const step = STATUS_MAP[key]
+                  const isActive = c.status === key
+                  return (
+                    <div key={key} onClick={() => setStatus(key)}
+                      style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'6px', cursor:'pointer' }}>
+                      <div style={{ width:'17px', height:'17px', borderRadius:'4px', border:'2px solid', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center',
+                        borderColor: isActive ? '#ef4444' : '#fecaca',
+                        backgroundColor: isActive ? '#ef4444' : 'white',
+                      }}>
+                        {isActive && <span style={{ color:'white', fontSize:'8px', fontWeight:900 }}>✓</span>}
+                      </div>
+                      <span style={{ fontSize:'10px', color: isActive ? '#ef4444' : '#fca5a5', fontWeight: isActive ? 700 : 400 }}>
+                        {step?.label}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
 
-      {/* MAIN CONTENT */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold text-slate-900">
-              {c.reclamo ? `Reclamo ${c.reclamo}` : 'Nuevo Caso'} — <span className="text-blue-600">{c.asegurado}</span>
-            </h1>
-            <p className="text-xs text-slate-500">{[c.aseguradora,c.tipo_poliza].filter(Boolean).join(' · ')}</p>
+      {/* ── MAIN CONTENT ──────────────────────────────────────────────────── */}
+      <div style={{ flex:1, overflowY:'auto', padding:'20px' }}>
+        <div style={{ maxWidth:'840px', margin:'0 auto', display:'flex', flexDirection:'column', gap:'16px' }}>
+
+          {/* Top bar */}
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <div>
+              <h1 style={{ fontSize:'17px', fontWeight:700, color:'#0f172a', margin:0 }}>
+                {c.reclamo ? `Reclamo ${c.reclamo}` : 'Nuevo Caso'} — <span style={{ color:'#2563eb' }}>{c.asegurado}</span>
+              </h1>
+              <p style={{ fontSize:'11px', color:'#94a3b8', margin:'2px 0 0' }}>{[c.aseguradora, c.tipo_poliza].filter(Boolean).join(' · ')}</p>
+            </div>
+            {/* Status dropdown */}
+            <div style={{ position:'relative' }}>
+              <button onClick={() => setShowStatusDD(!showStatusDD)}
+                style={{ padding:'6px 14px', borderRadius:'20px', color:'white', fontSize:'12px', fontWeight:700, border:'none', cursor:'pointer', backgroundColor:st.color, display:'flex', alignItems:'center', gap:'4px' }}>
+                {st.label} ▾
+              </button>
+              {showStatusDD && (
+                <div style={{ position:'absolute', right:0, top:'calc(100% + 6px)', backgroundColor:'white', borderRadius:'10px', boxShadow:'0 10px 40px rgba(0,0,0,0.12)', border:'1px solid #e2e8f0', padding:'6px', zIndex:50, width:'220px', maxHeight:'320px', overflowY:'auto' }}>
+                  {STATUSES.map(s => (
+                    <div key={s.key} onClick={() => setStatus(s.key)}
+                      style={{ display:'flex', alignItems:'center', gap:'8px', padding:'8px 10px', borderRadius:'6px', cursor:'pointer', fontSize:'12px', color:'#374151', backgroundColor: c.status===s.key ? '#eff6ff' : 'transparent' }}>
+                      <div style={{ width:'8px', height:'8px', borderRadius:'50%', backgroundColor:s.color, flexShrink:0 }} />
+                      {s.label}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-          <div className="relative">
-            <button onClick={()=>setShowStatusDD(!showStatusDD)} className="px-3 py-1 rounded-full text-white text-xs font-bold" style={{background:st.color}}>
-              {st.label} ▾
-            </button>
-            {showStatusDD && (
-              <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-xl border border-slate-200 p-1 z-50 w-56 max-h-80 overflow-y-auto">
-                {STATUSES.map(s=>(
-                  <div key={s.key} className="flex items-center gap-2 px-3 py-2 rounded cursor-pointer hover:bg-slate-50 text-xs" onClick={()=>setStatus(s.key)}>
-                    <div className="w-2 h-2 rounded-full" style={{background:s.color}} />{s.label}
-                  </div>
-                ))}
+
+          {/* NARRATIVA */}
+          <div style={{ backgroundColor:'white', borderRadius:'12px', border:`2px solid ${hasNarr ? '#86efac' : '#fde68a'}`, padding:'20px' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'10px' }}>
+              <h2 style={{ fontSize:'13px', fontWeight:700, color:'#0f172a', margin:0 }}>📝 Narrativa del Siniestro <span style={{ color:'#ef4444' }}>*</span></h2>
+              <span style={{ fontSize:'10px', fontWeight:700, padding:'3px 10px', borderRadius:'20px', backgroundColor: hasNarr?'#dcfce7':'#fef3c7', color: hasNarr?'#16a34a':'#d97706' }}>
+                {hasNarr ? '✓ Lista' : '⚠ Requerida'}
+              </span>
+            </div>
+            <p style={{ fontSize:'11px', color:'#94a3b8', marginBottom:'10px', margin:'0 0 10px' }}>Describe qué pasó, quién recibió, qué narró el asegurado, bienes afectados.</p>
+            <textarea id="narrativa-field"
+              style={{ width:'100%', padding:'10px 12px', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'12px', lineHeight:1.6, resize:'vertical', outline:'none', fontFamily:'inherit', boxSizing:'border-box', backgroundColor: hasNarr?'#f0fdf4':'white' }}
+              rows={5} value={c.narrativa||''} onChange={e=>updateField('narrativa',e.target.value)}
+              placeholder="El día ___, tras el apoderamiento, procedimos a coordinar con el intermediario..." />
+            <div style={{ fontSize:'10px', color:'#94a3b8', marginTop:'4px', display:'flex', justifyContent:'space-between' }}>
+              <span>{(c.narrativa||'').length} caracteres</span><span>Mínimo: 150</span>
+            </div>
+          </div>
+
+          {/* CONDICIONES PARTICULARES */}
+          <div style={{ backgroundColor:'white', borderRadius:'12px', border:'1px solid #e2e8f0', padding:'20px' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'12px' }}>
+              <h2 style={{ fontSize:'13px', fontWeight:700, color:'#0f172a', margin:0 }}>📄 Condiciones Particulares</h2>
+              <span style={{ fontSize:'10px', fontWeight:700, padding:'3px 10px', borderRadius:'20px',
+                backgroundColor: c.poliza_doc_name ? '#dcfce7' : '#fef3c7',
+                color: c.poliza_doc_name ? '#16a34a' : '#d97706' }}>
+                {c.poliza_doc_name ? '✓ Cargada' : '⚠ Pendiente'}
+              </span>
+            </div>
+
+            {c.poliza_doc_name ? (
+              <div style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px', backgroundColor:'#f8fafc', borderRadius:'8px', border:'1px solid #e2e8f0' }}>
+                <span style={{ fontSize:'24px' }}>📄</span>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:'12px', fontWeight:600, color:'#0f172a' }}>{c.poliza_doc_name}</div>
+                  {polizaMsg && <div style={{ fontSize:'11px', color:'#64748b', marginTop:'2px' }}>{polizaMsg}</div>}
+                </div>
+                <div style={{ display:'flex', gap:'8px' }}>
+                  <label style={{ padding:'5px 12px', backgroundColor:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'6px', fontSize:'11px', fontWeight:600, color:'#2563eb', cursor:'pointer' }}>
+                    {extractingPoliza ? '⏳ Extrayendo...' : '🔄 Re-extraer datos'}
+                    <input ref={polizaRef} type="file" accept=".pdf,.doc,.docx" onChange={handlePolizaUpload} hidden />
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign:'center', padding:'20px', backgroundColor:'#f8fafc', borderRadius:'8px', border:'1px dashed #cbd5e1' }}>
+                <div style={{ fontSize:'28px', marginBottom:'8px' }}>📎</div>
+                <p style={{ fontSize:'12px', color:'#64748b', marginBottom:'14px', margin:'0 0 14px' }}>
+                  Sube las condiciones particulares para completar datos automáticamente.
+                </p>
+                <label style={{ padding:'8px 16px', backgroundColor:'white', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'12px', fontWeight:600, color:'#475569', cursor:'pointer', display:'inline-block' }}>
+                  {uploadingPoliza || extractingPoliza ? '⏳ Procesando...' : '📎 Subir PDF o Word'}
+                  <input ref={polizaRef} type="file" accept=".pdf,.doc,.docx" onChange={handlePolizaUpload} hidden />
+                </label>
+                {polizaMsg && <p style={{ fontSize:'11px', color:'#64748b', marginTop:'8px' }}>{polizaMsg}</p>}
               </div>
             )}
           </div>
-        </div>
 
-        {/* NARRATIVA */}
-        <div className={`bg-white rounded-xl p-5 shadow-sm border-l-4 ${hasNarr?'border-l-emerald-500':'border-l-amber-500'}`}>
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="font-bold text-sm text-slate-800">📝 Narrativa del Siniestro *</h2>
-            <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${hasNarr?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>
-              {hasNarr?'✓ Lista':'⚠ Requerida'}
-            </span>
-          </div>
-          <p className="text-xs text-slate-500 mb-3">Describe qué pasó, quién te recibió, qué narró el asegurado, bienes afectados. Base para todos los documentos.</p>
-          <textarea id="narrativa-field" className={`w-full p-3 border rounded-lg text-sm focus:border-blue-500 focus:outline-none resize-y leading-relaxed ${hasNarr?'border-emerald-300 bg-emerald-50':'border-slate-200'}`}
-            rows={5} value={c.narrativa||''} onChange={e=>updateField('narrativa',e.target.value)}
-            placeholder="En fecha ___, tras el apoderamiento, nos comunicamos con el intermediario para coordinar. El día ___ visitamos el riesgo en ___, donde fuimos recibidos por ___. El asegurado nos narró que ___. Observamos que ___." style={{fontFamily:'inherit'}} />
-          <div className="text-[10px] text-slate-400 mt-1 flex justify-between">
-            <span>{(c.narrativa||'').length} caracteres</span><span>Mínimo: 150</span>
-          </div>
-        </div>
-
-        {/* DOCUMENT GENERATION */}
-        <div className="bg-white rounded-xl p-5 shadow-sm">
-          <h2 className="font-bold text-sm text-slate-800 mb-3">📄 Generar Documentos e Informes</h2>
-          <div className="grid grid-cols-2 gap-2">
-            {docActions.map((d,i)=>(
-              <button key={i} onClick={()=>generateDocument(d.title,d.action,d.type,d.req)}
-                disabled={generating || (d.req && !hasNarr)}
-                className={`p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-left text-xs text-slate-700 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 transition disabled:opacity-40 disabled:cursor-not-allowed`}>
-                {d.title}
-              </button>
-            ))}
-          </div>
-          {generating && <div className="mt-3 text-xs text-amber-600 font-semibold animate-pulse">⏳ Generando documento... esto puede tomar 15-30 segundos</div>}
-        </div>
-
-        {/* SAVED DOCUMENTS */}
-        {savedDocs.length > 0 && (
-          <div className="bg-white rounded-xl p-5 shadow-sm">
-            <h2 className="font-bold text-sm text-slate-800 mb-3">📂 Documentos Generados ({savedDocs.length})</h2>
-            {savedDocs.map((d:any)=>(
-              <div key={d.id} className="flex items-center justify-between p-2 border-b border-slate-50 hover:bg-slate-50 rounded">
-                <div className="cursor-pointer flex-1" onClick={()=>viewDoc(d)}>
-                  <div className="text-xs font-semibold text-slate-700">{d.title}</div>
-                  <div className="text-[10px] text-slate-400">{new Date(d.created_at).toLocaleString('es-DO',{dateStyle:'short',timeStyle:'short'})} · {d.status}</div>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button onClick={()=>copyText(d.content)} className="px-2 py-1 text-[10px] text-blue-600 hover:bg-blue-50 rounded">📋 Copiar</button>
-                  {DOC_TYPE_MAP[d.doc_type] && (
-                    <DownloadDocxButton
-                      docType={DOC_TYPE_MAP[d.doc_type]}
-                      caseData={caseDataForDocx}
-                      content={d.content}
-                    />
-                  )}
-                </div>
+          {/* CUADRO DE AJUSTE (solo visible en etapa de ajuste+) */}
+          {isAjuste && (
+            <div style={{ backgroundColor:'white', borderRadius:'12px', border:'1px solid #e2e8f0', padding:'20px' }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'12px' }}>
+                <h2 style={{ fontSize:'13px', fontWeight:700, color:'#0f172a', margin:0 }}>📊 Cuadro de Ajuste</h2>
+                {c.cuadro_ajuste_nombre && (
+                  <span style={{ fontSize:'10px', color:'#64748b' }}>{c.cuadro_ajuste_nombre}</span>
+                )}
               </div>
-            ))}
-          </div>
-        )}
 
-        {/* ACTIVITY */}
-        <div className="bg-white rounded-xl p-5 shadow-sm">
-          <h2 className="font-bold text-sm text-slate-800 mb-3">📜 Historial</h2>
-          {activity.length===0 ? <p className="text-xs text-slate-400">Sin actividad.</p> :
-            activity.map((a:any)=>(
-              <div key={a.id} className="flex items-start gap-2 mb-2 pb-2 border-b border-slate-50 last:border-0">
-                <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-1.5 flex-shrink-0" />
+              {cuadroData && cuadroData.length > 0 ? (
                 <div>
-                  <span className="text-xs text-slate-700 font-semibold">{a.action}</span>
-                  {a.details && <span className="text-xs text-slate-500"> — {a.details}</span>}
-                  <div className="text-[10px] text-slate-400 mt-0.5">{a.profiles?.short_name} · {new Date(a.created_at).toLocaleString('es-DO',{dateStyle:'short',timeStyle:'short'})}</div>
+                  <div style={{ overflowX:'auto', borderRadius:'8px', border:'1px solid #e2e8f0' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'11px' }}>
+                      <thead>
+                        <tr style={{ backgroundColor:'#1e3a8a' }}>
+                          {cuadroData[0].map((h: any, i: number) => (
+                            <th key={i} style={{ padding:'8px 12px', color:'white', textAlign:'left', fontWeight:600, whiteSpace:'nowrap' }}>
+                              {String(h || '').slice(0, 30)}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cuadroData.slice(1).map((row: any[], ri: number) => (
+                          <tr key={ri} style={{ backgroundColor: ri%2===0 ? 'white' : '#f8fafc', borderBottom:'1px solid #f1f5f9' }}>
+                            {row.map((cell: any, ci: number) => (
+                              <td key={ci} style={{ padding:'7px 12px', color:'#374151', whiteSpace:'nowrap' }}>
+                                {String(cell ?? '')}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <label style={{ marginTop:'10px', display:'inline-flex', alignItems:'center', gap:'6px', padding:'6px 12px', backgroundColor:'#f8fafc', border:'1px solid #e2e8f0', borderRadius:'6px', fontSize:'11px', fontWeight:600, color:'#64748b', cursor:'pointer' }}>
+                    🔄 Reemplazar
+                    <input ref={cuadroRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleCuadroUpload} hidden />
+                  </label>
+                </div>
+              ) : (
+                <div style={{ textAlign:'center', padding:'20px', backgroundColor:'#f8fafc', borderRadius:'8px', border:'1px dashed #cbd5e1' }}>
+                  <div style={{ fontSize:'28px', marginBottom:'8px' }}>📊</div>
+                  <p style={{ fontSize:'12px', color:'#64748b', marginBottom:'14px', margin:'0 0 14px' }}>
+                    Sube el cuadro de ajuste en Excel o CSV para visualizarlo aquí.
+                  </p>
+                  <label style={{ padding:'8px 16px', backgroundColor:'white', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'12px', fontWeight:600, color:'#475569', cursor:'pointer', display:'inline-block' }}>
+                    {uploadingCuadro ? '⏳ Procesando...' : '📊 Subir Excel / CSV'}
+                    <input ref={cuadroRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleCuadroUpload} hidden />
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* GENERACIÓN DE DOCUMENTOS */}
+          <div style={{ backgroundColor:'white', borderRadius:'12px', border:'1px solid #e2e8f0', padding:'20px' }}>
+            <h2 style={{ fontSize:'13px', fontWeight:700, color:'#0f172a', marginBottom:'14px', margin:'0 0 14px' }}>📄 Generar Documentos e Informes</h2>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px' }}>
+              {docActions.map((d, i) => (
+                <button key={i} onClick={() => generateDocument(d.title, d.action, d.type, d.req)}
+                  disabled={generating || (d.req && !hasNarr)}
+                  style={{ padding:'9px 12px', backgroundColor:'#f8fafc', border:'1px solid #e2e8f0', borderRadius:'8px', textAlign:'left', fontSize:'11px', color:'#374151', cursor: generating || (d.req && !hasNarr) ? 'not-allowed' : 'pointer', opacity: (d.req && !hasNarr) ? 0.5 : 1, transition:'all 0.15s', fontFamily:'inherit' }}
+                  onMouseEnter={e => { if (!generating && !(d.req && !hasNarr)) { (e.currentTarget.style.backgroundColor='#eff6ff'); (e.currentTarget.style.borderColor='#93c5fd'); (e.currentTarget.style.color='#1d4ed8') } }}
+                  onMouseLeave={e => { (e.currentTarget.style.backgroundColor='#f8fafc'); (e.currentTarget.style.borderColor='#e2e8f0'); (e.currentTarget.style.color='#374151') }}
+                >
+                  {d.title}
+                </button>
+              ))}
+            </div>
+            {generating && (
+              <div style={{ marginTop:'12px', fontSize:'12px', color:'#d97706', fontWeight:600 }}>
+                ⏳ Generando documento... 15-30 segundos
+              </div>
+            )}
+          </div>
+
+          {/* DOCUMENTOS GENERADOS */}
+          {savedDocs.length > 0 && (
+            <div style={{ backgroundColor:'white', borderRadius:'12px', border:'1px solid #e2e8f0', padding:'20px' }}>
+              <h2 style={{ fontSize:'13px', fontWeight:700, color:'#0f172a', marginBottom:'14px', margin:'0 0 14px' }}>
+                📂 Documentos Generados ({savedDocs.length})
+              </h2>
+              {savedDocs.map((d: any) => (
+                <div key={d.id} style={{ display:'flex', alignItems:'center', gap:'8px', padding:'10px', borderBottom:'1px solid #f1f5f9', borderRadius:'6px' }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor='#f8fafc'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor='transparent'}>
+                  <div style={{ flex:1, cursor:'pointer' }} onClick={() => viewDoc(d)}>
+                    <div style={{ fontSize:'12px', fontWeight:600, color:'#0f172a' }}>{d.title}</div>
+                    <div style={{ fontSize:'10px', color:'#94a3b8', marginTop:'1px' }}>
+                      {new Date(d.created_at).toLocaleString('es-DO', { dateStyle:'short', timeStyle:'short' })} · {d.status}
+                    </div>
+                  </div>
+                  <div style={{ display:'flex', alignItems:'center', gap:'6px' }}>
+                    <button onClick={() => copyText(d.content)}
+                      style={{ padding:'4px 10px', fontSize:'10px', color:'#2563eb', backgroundColor:'#eff6ff', border:'none', borderRadius:'5px', cursor:'pointer', fontWeight:600 }}>
+                      📋 Copiar
+                    </button>
+                    {DOC_TYPE_MAP[d.doc_type] && (
+                      <DownloadDocxButton docType={DOC_TYPE_MAP[d.doc_type]} caseData={caseDataForDocx} content={d.content} />
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* HISTORIAL */}
+          <div style={{ backgroundColor:'white', borderRadius:'12px', border:'1px solid #e2e8f0', padding:'20px' }}>
+            <h2 style={{ fontSize:'13px', fontWeight:700, color:'#0f172a', marginBottom:'14px', margin:'0 0 14px' }}>📜 Historial de Actividad</h2>
+            {activity.length === 0 ? (
+              <p style={{ fontSize:'12px', color:'#94a3b8' }}>Sin actividad registrada.</p>
+            ) : activity.map((a: any) => (
+              <div key={a.id} style={{ display:'flex', gap:'10px', marginBottom:'10px', paddingBottom:'10px', borderBottom:'1px solid #f8fafc' }}>
+                <div style={{ width:'6px', height:'6px', borderRadius:'50%', backgroundColor:'#93c5fd', marginTop:'5px', flexShrink:0 }} />
+                <div>
+                  <div style={{ display:'flex', alignItems:'center', gap:'6px' }}>
+                    <span style={{ fontSize:'11px', fontWeight:700, color:'#374151' }}>{a.action}</span>
+                    {a.details && <span style={{ fontSize:'11px', color:'#64748b' }}>— {a.details}</span>}
+                  </div>
+                  <div style={{ fontSize:'10px', color:'#94a3b8', marginTop:'2px' }}>
+                    {a.profiles?.short_name || '—'} · {new Date(a.created_at).toLocaleString('es-DO', { dateStyle:'short', timeStyle:'short' })}
+                  </div>
                 </div>
               </div>
-          ))}
+            ))}
+          </div>
+
         </div>
       </div>
     </div>
 
-    {/* GENERATION MODAL */}
+    {/* ── MODAL ─────────────────────────────────────────────────────────── */}
     {showGenModal && (
-      <div style=
-{{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9999,padding:"24px"}}>
-        <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl">
-          <div className="flex items-center justify-between p-5 border-b border-slate-200">
-            <h3 className="font-bold text-base text-slate-900">{genTitle}</h3>
-            <button onClick={()=>setShowGenModal(false)} className="text-slate-400 hover:text-red-500 text-xl">✕</button>
+      <div style={{ position:'fixed', inset:0, backgroundColor:'rgba(0,0,0,0.55)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999, padding:'24px' }}>
+        <div style={{ backgroundColor:'white', borderRadius:'16px', maxWidth:'760px', width:'100%', maxHeight:'85vh', display:'flex', flexDirection:'column', boxShadow:'0 25px 60px rgba(0,0,0,0.25)' }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'18px 22px', borderBottom:'1px solid #f1f5f9' }}>
+            <h3 style={{ fontSize:'15px', fontWeight:700, color:'#0f172a', margin:0 }}>{genTitle}</h3>
+            <button onClick={() => setShowGenModal(false)} style={{ fontSize:'18px', color:'#94a3b8', background:'none', border:'none', cursor:'pointer', lineHeight:1 }}>✕</button>
           </div>
-          <div className="flex-1 overflow-y-auto p-5">
+          <div style={{ flex:1, overflowY:'auto', padding:'22px' }}>
             {generating ? (
-              <div className="flex items-center justify-center py-20">
-                <div className="text-center">
-                  <div className="w-10 h-10 border-3 border-slate-200 border-t-blue-600 rounded-full animate-spin mx-auto mb-4" style={{borderWidth:'3px'}} />
-                  <p className="text-sm text-slate-500 font-semibold">Generando documento...</p>
-                  <p className="text-xs text-slate-400 mt-1">Esto puede tomar 15-30 segundos</p>
-                </div>
+              <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'60px 0' }}>
+                <div style={{ width:'40px', height:'40px', border:'3px solid #e2e8f0', borderTopColor:'#2563eb', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
+                <p style={{ fontSize:'13px', color:'#64748b', marginTop:'16px', fontWeight:600 }}>Generando documento...</p>
+                <p style={{ fontSize:'12px', color:'#94a3b8', marginTop:'4px' }}>15-30 segundos</p>
               </div>
             ) : (
-              <pre className="whitespace-pre-wrap text-sm text-slate-800 leading-relaxed font-sans">{genResult}</pre>
+              <pre style={{ whiteSpace:'pre-wrap', fontSize:'13px', color:'#374151', lineHeight:1.7, fontFamily:'inherit', margin:0 }}>{genResult}</pre>
             )}
           </div>
           {!generating && genResult && (
-            <div className="flex gap-3 p-5 border-t border-slate-200">
-              <button onClick={()=>copyText(genResult)} className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm font-semibold hover:bg-blue-800">
+            <div style={{ display:'flex', gap:'10px', padding:'18px 22px', borderTop:'1px solid #f1f5f9' }}>
+              <button onClick={() => copyText(genResult)}
+                style={{ padding:'9px 20px', backgroundColor:'#1e3a8a', color:'white', borderRadius:'8px', fontSize:'13px', fontWeight:700, border:'none', cursor:'pointer' }}>
                 📋 Copiar al Portapapeles
               </button>
-              <button onClick={()=>setShowGenModal(false)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-sm hover:bg-slate-200">
+              <button onClick={() => setShowGenModal(false)}
+                style={{ padding:'9px 20px', backgroundColor:'#f1f5f9', color:'#64748b', borderRadius:'8px', fontSize:'13px', border:'none', cursor:'pointer' }}>
                 Cerrar
               </button>
             </div>
@@ -414,6 +757,8 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
         </div>
       </div>
     )}
+
+    <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
     </>
   )
 }
