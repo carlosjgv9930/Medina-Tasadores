@@ -9,6 +9,7 @@ import {
 import StatusBadge from '@/components/StatusBadge'
 import DownloadDocxButton from '@/components/DownloadDocxButton'
 import type { DocType } from '@/lib/docx-generator'
+import { pdfToImages } from '@/lib/pdf-to-images'
 
 // ─── TIPOS ───────────────────────────────────────────────────────────────────
 
@@ -150,34 +151,15 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
 
   async function extractPolizaData(file: File) {
     try {
+      // Convertir PDF a imágenes (funciona con PDFs escaneados y digitales)
       let requestBody: Record<string, unknown>
+      const images = await pdfToImages(file)
 
-      // Intentar convertir PDF a imágenes para leer escáneres
-      // (funciona gracias a canvas:false en next.config.ts)
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const pdfjs: any = await import('pdfjs-dist')
-        pdfjs.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-        const buffer = await file.arrayBuffer()
-        const pdf = await pdfjs.getDocument({ data: buffer }).promise
-        const numPages = Math.min(pdf.numPages as number, 4)
-        const images: string[] = []
-        for (let i = 1; i <= numPages; i++) {
-          const page = await pdf.getPage(i)
-          const viewport = page.getViewport({ scale: 2.0 })
-          const canvas = document.createElement('canvas')
-          canvas.width = viewport.width as number
-          canvas.height = viewport.height as number
-          const ctx = canvas.getContext('2d')
-          if (!ctx) continue
-          await page.render({ canvasContext: ctx as unknown, viewport }).promise
-          images.push(canvas.toDataURL('image/jpeg', 0.9).split(',')[1])
-          canvas.remove()
-        }
+      if (images.length > 0) {
+        // PDF convertido a imágenes — Claude las lee con visión
         requestBody = { images, fileName: file.name }
-      } catch {
-        // Fallback: enviar PDF directamente (para PDFs con texto digital)
+      } else {
+        // Fallback: enviar PDF directamente (PDFs con texto digital)
         const reader = new FileReader()
         const base64 = await new Promise<string>((res) => {
           reader.onload = (ev) => res((ev.target?.result as string).split(',')[1])
