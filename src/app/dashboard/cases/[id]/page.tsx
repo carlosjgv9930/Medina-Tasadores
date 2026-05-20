@@ -122,31 +122,27 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
     const file = e.target.files?.[0]
     if (!file) return
     setUploadingPoliza(true)
-    setPolizaMsg('Subiendo archivo...')
+    setPolizaMsg('Registrando archivo...')
 
     try {
-      const filePath = `${id}/poliza/${file.name}`
-      const { error: upErr } = await supabase.storage.from('expedientes').upload(filePath, file, { upsert: true })
-      if (upErr) throw upErr
+      // Guardar nombre del archivo en la base de datos (sin subir al Storage)
+      await supabase.from('cases').update({ poliza_doc_name: file.name }).eq('id', id)
+      setC((prev: any) => ({ ...prev, poliza_doc_name: file.name }))
 
-      const { data: urlData } = supabase.storage.from('expedientes').getPublicUrl(filePath)
-      await supabase.from('cases').update({ poliza_doc_url: urlData.publicUrl, poliza_doc_name: file.name }).eq('id', id)
-      setC((prev: any) => ({ ...prev, poliza_doc_url: urlData.publicUrl, poliza_doc_name: file.name }))
-
-      await supabase.from('case_activity').insert({ case_id: id, user_id: profile?.id, action: 'Condiciones particulares cargadas', details: file.name })
+      await supabase.from('case_activity').insert({ case_id: id, user_id: profile?.id, action: 'Condiciones particulares registradas', details: file.name })
       refreshActivity()
 
-      // Auto-extract if PDF
+      // Auto-extraer datos si es PDF
       if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
         setUploadingPoliza(false)
         setExtractingPoliza(true)
         setPolizaMsg('Extrayendo datos con IA...')
         await extractPolizaData(file)
       } else {
-        setPolizaMsg('✅ Archivo guardado')
+        setPolizaMsg('✅ Archivo registrado (solo PDF permite extracción automática)')
       }
     } catch (err: any) {
-      setPolizaMsg('⚠️ Error: ' + (err.message || 'No se pudo subir el archivo'))
+      setPolizaMsg('⚠️ Error: ' + (err.message || 'No se pudo registrar el archivo'))
     }
     setUploadingPoliza(false)
     setExtractingPoliza(false)

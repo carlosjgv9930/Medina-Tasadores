@@ -93,15 +93,7 @@ export default function NewCasePage() {
     const { data, error } = await supabase.from('cases').insert(insertData).select().single()
     if (error) { alert('Error al crear el caso: ' + error.message); setSaving(false); return }
 
-    // Upload policy file to storage if present
-    if (polizaFile && data?.id) {
-      const filePath = `${data.id}/poliza/${polizaFile.name}`
-      const { error: upErr } = await supabase.storage.from('expedientes').upload(filePath, polizaFile, { upsert: true })
-      if (!upErr) {
-        const { data: urlData } = supabase.storage.from('expedientes').getPublicUrl(filePath)
-        await supabase.from('cases').update({ poliza_doc_url: urlData.publicUrl }).eq('id', data.id)
-      }
-    }
+    // Nombre de la póliza ya está incluido en insertData.poliza_doc_name
 
     await supabase.from('case_activity').insert({
       case_id: data.id, user_id: user?.id,
