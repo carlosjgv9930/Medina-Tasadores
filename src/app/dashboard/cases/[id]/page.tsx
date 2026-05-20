@@ -150,15 +150,41 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
 
   async function extractPolizaData(file: File) {
     try {
-      const reader = new FileReader()
-      const base64 = await new Promise<string>((res) => {
-        reader.onload = (ev) => res((ev.target?.result as string).split(',')[1])
-        reader.readAsDataURL(file)
-      })
+      // Intentar convertir PDF a imágenes (funciona con PDFs escaneados)
+      let requestBody: any
+      try {
+        const pdfjsLib = await import('pdfjs-dist')
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+        const arrayBuffer = await file.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+        const numPages = Math.min(pdf.numPages, 4)
+        const images: string[] = []
+        for (let i = 1; i <= numPages; i++) {
+          const page = await pdf.getPage(i)
+          const viewport = page.getViewport({ scale: 1.5 })
+          const canvas = document.createElement('canvas')
+          canvas.width = viewport.width
+          canvas.height = viewport.height
+          const ctx = canvas.getContext('2d')!
+          await page.render({ canvasContext: ctx, viewport }).promise
+          images.push(canvas.toDataURL('image/jpeg', 0.85).split(',')[1])
+        }
+        requestBody = { images, fileType: 'image/jpeg', fileName: file.name }
+      } catch {
+        // Fallback: enviar como documento PDF (para PDFs con texto)
+        const reader = new FileReader()
+        const base64 = await new Promise<string>((res) => {
+          reader.onload = (ev) => res((ev.target?.result as string).split(',')[1])
+          reader.readAsDataURL(file)
+        })
+        requestBody = { fileBase64: base64, fileType: file.type, fileName: file.name }
+      }
+
       const resp = await fetch('/api/extract-poliza', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileBase64: base64, fileType: file.type, fileName: file.name }),
+        body: JSON.stringify(requestBody),
       })
       const data = await resp.json()
       if (!data.error) {
